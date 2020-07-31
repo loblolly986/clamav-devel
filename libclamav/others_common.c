@@ -1211,47 +1211,36 @@ cl_error_t cli_get_filepath_from_filedesc(int desc, char **filepath)
     }
 
 #elif _WIN32
-    DWORD dwRet                   = 0;
-    intptr_t hFile                = _get_osfhandle(desc);
-    char *long_evaluated_filepath = NULL;
+    DWORD dwRet  = 0;
+    HANDLE hFile = (HANDLE) _get_osfhandle(desc);
 
     if (NULL == filepath) {
         cli_errmsg("cli_get_filepath_from_filedesc: Invalid args.\n");
         goto done;
     }
 
-    dwRet = GetFinalPathNameByHandleA((HANDLE)hFile, NULL, 0, VOLUME_NAME_DOS);
+    dwRet = GetFinalPathNameByHandleA(hFile, NULL, 0, VOLUME_NAME_DOS);
     if (dwRet == 0) {
         cli_errmsg("cli_get_filepath_from_filedesc: Failed to resolve filename for descriptor %d\n", desc);
         status = CL_EOPEN;
         goto done;
     }
 
-    long_evaluated_filepath = calloc(dwRet + 1, 1);
-    if (NULL == long_evaluated_filepath) {
-        cli_errmsg("cli_get_filepath_from_filedesc: Failed to allocate %u bytes to store filename\n", dwRet + 1);
-        status = CL_EMEM;
-        goto done;
-    }
-
-    dwRet = GetFinalPathNameByHandleA((HANDLE)hFile, long_evaluated_filepath, dwRet + 1, VOLUME_NAME_DOS);
-    if (dwRet == 0) {
-        cli_errmsg("cli_get_filepath_from_filedesc: Failed to resolve filename for descriptor %d\n", desc);
-        free(long_evaluated_filepath);
-        long_evaluated_filepath = NULL;
-        status                  = CL_EOPEN;
-        goto done;
-    }
-
-    evaluated_filepath = calloc(strlen(long_evaluated_filepath) - strlen("\\\\?\\") + 1, 1);
+    evaluated_filepath = calloc(dwRet + 1, 1);
     if (NULL == evaluated_filepath) {
         cli_errmsg("cli_get_filepath_from_filedesc: Failed to allocate %u bytes to store filename\n", dwRet + 1);
         status = CL_EMEM;
         goto done;
     }
-    memcpy(evaluated_filepath,
-           long_evaluated_filepath + strlen("\\\\?\\"),
-           strlen(long_evaluated_filepath) - strlen("\\\\?\\"));
+
+    dwRet = GetFinalPathNameByHandleA(hFile, evaluated_filepath, dwRet + 1, VOLUME_NAME_DOS);
+    if (dwRet == 0) {
+        cli_errmsg("cli_get_filepath_from_filedesc: Failed to resolve filename for descriptor %d\n", desc);
+        free(evaluated_filepath);
+        evaluated_filepath = NULL;
+        status             = CL_EOPEN;
+        goto done;
+    }
 
 #else
 
@@ -1261,7 +1250,7 @@ cl_error_t cli_get_filepath_from_filedesc(int desc, char **filepath)
 
 #endif
 
-    cli_dbgmsg("cli_get_filepath_from_filedesc: File path for fd [%d] is: %s\n", desc, *filepath);
+    cli_dbgmsg("cli_get_filepath_from_filedesc: File path for fd [%d] is: %s\n", desc, evaluated_filepath);
     status    = CL_SUCCESS;
     *filepath = evaluated_filepath;
 
@@ -1280,6 +1269,8 @@ cl_error_t cli_realpath(const char *file_name, char **real_filename)
     char *real_file_path = NULL;
     cl_error_t status    = CL_EARG;
 #ifdef _WIN32
+    wchar_t *file_name_w = NULL;
+    HANDLE hFile = NULL;
     int desc = -1;
 #endif
 
@@ -1302,8 +1293,25 @@ cl_error_t cli_realpath(const char *file_name, char **real_filename)
 
 #else
 
-    if ((desc = safe_open(file_name, O_RDONLY | O_BINARY)) == -1) {
+    file_name_w = uncpath(file_name);
+    if (!file_name_w) {
+        cli_errmsg("cli_realpath: uncpath() failed: %s\n", strerror(errno));
+        status = CL_EOPEN;
+        goto done;
+    }
+
+    hFile = CreateFileW(file_name_w, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    free(file_name_w);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        cli_warnmsg("Can't open file %s: GetLastError() = %lu\n", file_name, GetLastError());
+        status = CL_EOPEN;
+        goto done;
+    }
+    desc = _open_osfhandle((intptr_t) hFile, _O_RDONLY | _O_BINARY);
+    if (desc == -1) {
         cli_warnmsg("Can't open file %s: %s\n", file_name, strerror(errno));
+        CloseHandle(hFile);
         status = CL_EOPEN;
         goto done;
     }
@@ -1318,7 +1326,7 @@ done:
 
 #ifdef _WIN32
     if (-1 != desc) {
-        close(desc);
+        _close(desc);
     }
 #endif
 
